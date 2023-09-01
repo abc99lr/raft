@@ -1,0 +1,53 @@
+{
+  "dataset": {
+    "name": "sift-128-euclidean",
+    "base_file": "sift-128-euclidean/base.fbin",
+    "query_file": "sift-128-euclidean/query.fbin",
+    "groundtruth_neighbors_file": "sift-128-euclidean/groundtruth.neighbors.ibin",
+    "distance": "euclidean"
+  },
+
+  "search_basic_param": {
+    "batch_size": 5000,
+    "k": 10
+  },
+
+  "index": [
+    {
+      "name": "raft_ivf_flat.nlist1024",
+      "algo": "raft_ivf_flat",
+      "build_param": {"nlist": 1024},
+      "file": "sift-128-euclidean/raft_ivf_flat/nlist1024",
+      "search_params": [
+        {"nprobe": 1}, {"nprobe": 5}, {"nprobe": 10}, {"nprobe": 50}, {"nprobe": 100}, {"nprobe": 200}, {"nprobe": 500}, {"nprobe": 1000}, {"nprobe": 2000}
+      ]
+    },
+    {
+      "name": "raft_ivf_flat.nlist16384",
+      "algo": "raft_ivf_flat",
+      "build_param": {"nlist": 16384},
+      "file": "sift-128-euclidean/raft_ivf_flat/nlist16384",
+      "search_params": [
+        {"nprobe": 1}, {"nprobe": 5}, {"nprobe": 10}, {"nprobe": 50}, {"nprobe": 100}, {"nprobe": 200}, {"nprobe": 500}, {"nprobe": 1000}, {"nprobe": 2000}
+      ]
+    },
+    {
+      "name": "raft_ivf_flat.nlist16384",
+      "algo": "raft_ivf_flat",
+      "build_param": {"nlist": 16384},
+      "file": "sift-128-euclidean/raft_ivf_flat/nlist16384",
+      "search_params": [
+        {"nprobe": 1}, {"nprobe": 5}, {"nprobe": 10}, {"nprobe": 50}, {"nprobe": 100}, {"nprobe": 200}, {"nprobe": 500}, {"nprobe": 1000}, {"nprobe": 2000}
+      ]
+    },
+    {
+      "name": "raft_ivf_flat.nlist16384",
+      "algo": "raft_ivf_flat",
+      "build_param": {"nlist": 16384},
+      "file": "sift-128-euclidean/raft_ivf_flat/nlist16384",
+      "search_params": [
+        {"nprobe": 1}, {"nprobe": 5}, {"nprobe": 10}, {"nprobe": 50}, {"nprobe": 100}, {"nprobe": 200}, {"nprobe": 500}, {"nprobe": 1000}, {"nprobe": 2000}
+      ]
+    }
+  ]
+}
