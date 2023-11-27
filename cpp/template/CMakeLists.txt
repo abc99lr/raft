@@ -34,8 +34,14 @@ rapids_cpm_init()
 include(cmake/thirdparty/get_raft.cmake)
 
 # -------------- compile tasks ----------------- #
-add_executable(CAGRA_EXAMPLE src/cagra_example.cu)
-target_link_libraries(CAGRA_EXAMPLE PRIVATE raft::raft raft::compiled)
+# add_executable(CAGRA_EXAMPLE src/cagra_example.cu)
+# target_link_libraries(CAGRA_EXAMPLE PRIVATE raft::raft raft::compiled)
 
-add_executable(IVF_FLAT_EXAMPLE src/ivf_flat_example.cu)
-target_link_libraries(IVF_FLAT_EXAMPLE PRIVATE raft::raft raft::compiled)
+# add_executable(IVF_FLAT_EXAMPLE src/ivf_flat_example.cu)
+# target_link_libraries(IVF_FLAT_EXAMPLE PRIVATE raft::raft raft::compiled)
+
+add_executable(IVF_PQ_EXAMPLE src/ivf_pq_example.cu)
+target_link_libraries(IVF_PQ_EXAMPLE PRIVATE raft::raft raft::compiled)
+
+add_executable(IVF_PQ_EXAMPLE_PROFILE src/ivf_pq_example_profile.cu)
+target_link_libraries(IVF_PQ_EXAMPLE_PROFILE PRIVATE raft::raft raft::compiled)

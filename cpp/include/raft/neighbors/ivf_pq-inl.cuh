@@ -60,6 +60,7 @@ index<IdxT> build(raft::resources const& handle,
 {
   IdxT n_rows = dataset.extent(0);
   IdxT dim    = dataset.extent(1);
+  // printf("parent build func. N rows %ld, dim %ld\n", n_rows, dim);
   return detail::build(handle, params, dataset.data_handle(), n_rows, dim);
 }
 

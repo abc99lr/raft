@@ -130,6 +130,7 @@ void fusedL2NN(OutT* min,
     }
   } else {
     if (is_skinny) {
+      // printf("*"); 
       detail::fusedL2NNImpl<DataT,
                             OutT,
                             IdxT,
@@ -191,6 +192,7 @@ void fusedL2NNMinReduce(OutT* min,
                         bool initOutBuffer,
                         cudaStream_t stream)
 {
+  // std::cout << "M, N, K, DataType, OutType " << m << " " << n << " " << k << " " << sizeof(DataT) << " " << sizeof(OutT) << "\n"; 
   MinAndDistanceReduceOp<IdxT, DataT> redOp;
   KVPMinReduce<IdxT, DataT> pairRedOp;
 

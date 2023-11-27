@@ -59,6 +59,8 @@
 
 #include <memory>
 #include <variant>
+#include <chrono>
+#include <iostream>
 
 namespace raft::neighbors::ivf_pq::detail {
 
@@ -347,14 +349,17 @@ void train_per_subset(raft::resources const& handle,
                       uint32_t kmeans_n_iters,
                       rmm::mr::device_memory_resource* managed_memory)
 {
+  // printf("inside train_per_subset\n");
   auto stream        = resource::get_cuda_stream(handle);
   auto device_memory = resource::get_workspace_resource(handle);
 
   rmm::device_uvector<float> pq_centers_tmp(index.pq_centers().size(), stream, device_memory);
+  // std::cout << "PQ center size " << index.pq_centers().size() << "\n"; 
   rmm::device_uvector<float> sub_trainset(n_rows * size_t(index.pq_len()), stream, device_memory);
   rmm::device_uvector<uint32_t> sub_labels(n_rows, stream, device_memory);
 
   rmm::device_uvector<uint32_t> pq_cluster_sizes(index.pq_book_size(), stream, device_memory);
+  // std::cout << "PQ cluster size " << index.pq_book_size() << "\n"; 
 
   for (uint32_t j = 0; j < index.pq_dim(); j++) {
     common::nvtx::range<common::nvtx::domain::raft> pq_per_subspace_scope(
@@ -404,6 +409,7 @@ void train_per_subset(raft::resources const& handle,
     raft::cluster::kmeans_balanced_params kmeans_params;
     kmeans_params.n_iters = kmeans_n_iters;
     kmeans_params.metric  = raft::distance::DistanceType::L2Expanded;
+    // std::cout << "kmeans iter " << kmeans_params.n_iters << "\n"; 
     raft::cluster::kmeans_balanced::helpers::build_clusters(handle,
                                                             kmeans_params,
                                                             sub_trainset_view,
@@ -1532,6 +1538,8 @@ auto build(raft::resources const& handle,
   utils::memzero(index.inds_ptrs().data_handle(), index.inds_ptrs().size(), stream);
 
   {
+    auto start = std::chrono::system_clock::now(); 
+
     auto trainset_ratio = std::max<size_t>(
       1,
       size_t(n_rows) / std::max<size_t>(params.kmeans_trainset_fraction * n_rows, index.n_lists()));
@@ -1604,6 +1612,12 @@ auto build(raft::resources const& handle,
       }
     }
 
+    resource::sync_stream(handle);
+    auto end_subsample = std::chrono::system_clock::now(); 
+    auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end_subsample - start); 
+    std::cout << elapsed_ms.count() << ",";
+
+
     // NB: here cluster_centers is used as if it is [n_clusters, data_dim] not [n_clusters,
     // dim_ext]!
     rmm::device_uvector<float> cluster_centers_buf(
@@ -1621,6 +1635,12 @@ auto build(raft::resources const& handle,
     raft::cluster::kmeans_balanced::fit(
       handle, kmeans_params, trainset_const_view, centers_view, utils::mapping<float>{});
 
+
+    resource::sync_stream(handle);
+    auto end_kmeans_fit= std::chrono::system_clock::now(); 
+    elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end_kmeans_fit-end_subsample); 
+    std::cout << elapsed_ms.count() << ",";
+
     // Trainset labels are needed for training PQ codebooks
     rmm::device_uvector<uint32_t> labels(n_rows_train, stream, big_memory_resource);
     auto centers_const_view = raft::make_device_matrix_view<const float, IdxT>(
@@ -1632,6 +1652,11 @@ auto build(raft::resources const& handle,
                                             centers_const_view,
                                             labels_view,
                                             utils::mapping<float>());
+
+    resource::sync_stream(handle);
+    auto end_kmeans_predict= std::chrono::system_clock::now(); 
+    elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end_kmeans_predict-end_kmeans_fit); 
+    std::cout << elapsed_ms.count() << ",";
 
     {
       // combine cluster_centers and their norms
@@ -1662,12 +1687,23 @@ auto build(raft::resources const& handle,
                                       stream));
     }
 
+    resource::sync_stream(handle);
+    auto end_combine_center_norm= std::chrono::system_clock::now(); 
+    elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end_combine_center_norm-end_kmeans_predict); 
+    std::cout << elapsed_ms.count() << ",";
+
+
     // Make rotation matrix
     make_rotation_matrix(handle,
                          params.force_random_rotation,
                          index.rot_dim(),
                          index.dim(),
                          index.rotation_matrix().data_handle());
+
+    resource::sync_stream(handle);
+    auto end_rotation_matrix = std::chrono::system_clock::now(); 
+    elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end_rotation_matrix - end_combine_center_norm); 
+    std::cout << elapsed_ms.count() << ",";
 
     // Rotate cluster_centers
     float alpha = 1.0;
@@ -1687,6 +1723,14 @@ auto build(raft::resources const& handle,
                  index.centers_rot().data_handle(),
                  index.rot_dim(),
                  stream);
+
+    resource::sync_stream(handle);
+    auto end_rotate_cluster_center = std::chrono::system_clock::now(); 
+    elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end_rotate_cluster_center - end_rotation_matrix);
+    std::cout << elapsed_ms.count() << ",";
+    // std::cout << "rotation matrix dim " << index.rotation_matrix().extent(0) << " " << index.rotation_matrix().extent(1) << "\n"; 
+    // std::cout << "cluster_centers dim " << centers_view.extent(0) << " " << centers_view.extent(1) << "\n"; 
+    // std::cout << "centers_rot dim " << index.centers_rot().extent(0) << " " << index.centers_rot().extent(1) << "\n"; 
 
     // Train PQ codebooks
     switch (index.codebook_kind()) {
@@ -1710,12 +1754,24 @@ auto build(raft::resources const& handle,
         break;
       default: RAFT_FAIL("Unreachable code");
     }
+
+    resource::sync_stream(handle);
+    auto end_train_pq = std::chrono::system_clock::now(); 
+    elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end_train_pq - end_rotate_cluster_center);
+    std::cout << elapsed_ms.count() << ",";
+
   }
 
+  auto start_extend = std::chrono::system_clock::now(); 
   // add the data if necessary
   if (params.add_data_on_build) {
     detail::extend<T, IdxT>(handle, &index, dataset, nullptr, n_rows);
   }
+
+  resource::sync_stream(handle);
+  auto end_extend = std::chrono::system_clock::now(); 
+  auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end_extend - start_extend);
+  std::cout << elapsed_ms.count() << ",";
   return index;
 }
 }  // namespace raft::neighbors::ivf_pq::detail

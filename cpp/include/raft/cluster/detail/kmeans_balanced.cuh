@@ -56,9 +56,241 @@
 
 #include <tuple>
 
+// #define TEST_KENREL_NN_FUSED_REDUCE
 namespace raft::cluster::detail {
 
 constexpr static inline float kAdjustCentersWeight = 7.0f;
+
+template <bool sqrt, 
+          typename MathT, 
+          typename IdxT,
+          typename LabelT>
+__global__ void  L2_distance_kernel_small_K_v1(
+                            const MathT* dataset, // dataset [n_rows, dim]
+                            const MathT* centers, // centers [n_clusters, dim]
+                            const MathT* dataset_norm, // dataset_norm [n_rows] 
+                            const MathT* centers_norm,  // centers_norm [n_clusters]
+                            IdxT n_rows,
+                            IdxT n_clusters,
+                            IdxT dim,
+                            LabelT* labels // [n_rows]
+                            )
+{
+  extern __shared__ char smem[];
+  MathT *centers_shared = reinterpret_cast<MathT*>(smem);
+  int curr_num_row = blockDim.x * blockIdx.x + threadIdx.x;
+
+  int second_matrix_id = threadIdx.x; 
+  while (second_matrix_id < n_clusters * dim) {
+    centers_shared[second_matrix_id] = centers[second_matrix_id];
+    second_matrix_id += blockDim.x; 
+  }
+  
+  __syncthreads(); 
+
+  if (curr_num_row < n_rows) {
+    MathT min_distance = std::numeric_limits<MathT>::max(); 
+    IdxT location = 0; 
+    #pragma unroll 
+    for (int curr_n = 0; curr_n < n_clusters; curr_n++) {
+      MathT curr_distance = dataset_norm[curr_num_row] + centers_norm[curr_n]; 
+      #pragma unroll 
+      for (int curr_k = 0; curr_k < dim; curr_k++) {
+        curr_distance -= 2 * dataset[curr_num_row * dim + curr_k] * centers_shared[curr_n * dim + curr_k]; 
+        /**
+        * Self-neighboring points should have (aNorm == bNorm) == accVal and the dot product (accVal)
+        * can sometimes have round-off errors, which will cause (aNorm == bNorm) ~ accVal instead.
+        */
+        curr_distance = curr_distance * !((curr_distance * curr_distance < raft::distance::detail::ops::get_clamp_precision<MathT>()) * (dataset_norm[curr_num_row] == centers_norm[curr_n]));
+        if (sqrt) {
+          curr_distance = raft::sqrt<MathT>(curr_distance * (curr_distance > 0)); 
+        } 
+      }
+      if (curr_distance < min_distance) {
+        min_distance = curr_distance;
+        location = curr_n; 
+      }
+    }
+    labels[curr_num_row] = location; 
+  }
+}
+
+template <bool sqrt, 
+          typename MathT, 
+          typename IdxT,
+          typename LabelT>
+__global__ void  L2_distance_kernel_small_K_v1_coarsening(
+                            const MathT* dataset, // dataset [n_rows, dim]
+                            const MathT* centers, // centers [n_clusters, dim]
+                            const MathT* dataset_norm, // dataset_norm [n_rows] 
+                            const MathT* centers_norm,  // centers_norm [n_clusters]
+                            IdxT n_rows,
+                            IdxT n_clusters,
+                            IdxT dim,
+                            LabelT* labels // [n_rows]
+                            )
+{
+  extern __shared__ char smem[];
+  MathT *centers_shared = reinterpret_cast<MathT*>(smem);
+  int curr_num_row = blockDim.x * blockIdx.x + threadIdx.x;
+
+  int second_matrix_id = threadIdx.x; 
+  while (second_matrix_id < n_clusters * dim) {
+    centers_shared[second_matrix_id] = centers[second_matrix_id];
+    second_matrix_id += blockDim.x; 
+  }
+  
+  __syncthreads(); 
+
+  if (curr_num_row < n_rows) {
+    MathT min_distance = std::numeric_limits<MathT>::max(); 
+    IdxT location = 0; 
+    #pragma unroll 
+    for (int curr_n = 0; curr_n < n_clusters; curr_n++) {
+      MathT curr_distance = dataset_norm[curr_num_row] + centers_norm[curr_n]; 
+      #pragma unroll 
+      for (int curr_k = 0; curr_k < dim; curr_k++) {
+        curr_distance -= 2 * dataset[curr_num_row * dim + curr_k] * centers_shared[curr_n * dim + curr_k]; 
+        /**
+        * Self-neighboring points should have (aNorm == bNorm) == accVal and the dot product (accVal)
+        * can sometimes have round-off errors, which will cause (aNorm == bNorm) ~ accVal instead.
+        */
+        curr_distance = curr_distance * !((curr_distance * curr_distance < raft::distance::detail::ops::get_clamp_precision<MathT>()) * (dataset_norm[curr_num_row] == centers_norm[curr_n]));
+        if (sqrt) {
+          curr_distance = raft::sqrt<MathT>(curr_distance * (curr_distance > 0)); 
+        } 
+      }
+      if (curr_distance < min_distance) {
+        min_distance = curr_distance;
+        location = curr_n; 
+      }
+    }
+    labels[curr_num_row] = location; 
+  }
+}
+
+template <bool sqrt, 
+          typename MathT, 
+          typename IdxT,
+          typename LabelT>
+__global__ void  L2_distance_kernel_small_K_v2(
+                            const MathT* dataset, // dataset [n_rows, dim]
+                            const MathT* centers, // centers [n_clusters, dim]
+                            const MathT* dataset_norm, // dataset_norm [n_rows] 
+                            const MathT* centers_norm,  // centers_norm [n_clusters]
+                            IdxT n_rows,
+                            IdxT n_clusters,
+                            IdxT dim,
+                            LabelT* labels // [n_rows]
+                            )
+{
+  extern __shared__ char smem[];
+  MathT *centers_shared = reinterpret_cast<MathT*>(smem);
+  MathT *dataset_shared = centers_shared + n_clusters * dim; 
+  int starting_row = blockDim.x * blockIdx.x; 
+  int curr_row = blockDim.x * blockIdx.x + threadIdx.x; 
+
+  int shmem_loading_idx = threadIdx.x; 
+  while (shmem_loading_idx < n_clusters * dim) {
+    centers_shared[shmem_loading_idx] = centers[shmem_loading_idx];
+    shmem_loading_idx += blockDim.x; 
+  }
+
+  shmem_loading_idx = threadIdx.x; 
+  while (shmem_loading_idx < blockDim.x * dim) {
+    if (starting_row * dim + shmem_loading_idx < n_rows * dim)
+      dataset_shared[shmem_loading_idx] = dataset[starting_row * dim + shmem_loading_idx];
+    shmem_loading_idx += blockDim.x; 
+  }
+  
+  __syncthreads(); 
+
+  if (curr_row < n_rows) {
+    MathT min_distance = std::numeric_limits<MathT>::max(); 
+    IdxT location = 0; 
+    #pragma unroll 
+    for (int curr_n = 0; curr_n < n_clusters; curr_n++) {
+      MathT curr_distance = dataset_norm[curr_row] + centers_norm[curr_n]; 
+      #pragma unroll 
+      for (int curr_k = 0; curr_k < dim; curr_k++) {
+        curr_distance -= 2 * dataset_shared[threadIdx.x * dim + curr_k] * centers_shared[curr_n * dim + curr_k]; 
+        /**
+        * Self-neighboring points should have (aNorm == bNorm) == accVal and the dot product (accVal)
+        * can sometimes have round-off errors, which will cause (aNorm == bNorm) ~ accVal instead.
+        */
+        curr_distance = curr_distance * !((curr_distance * curr_distance < raft::distance::detail::ops::get_clamp_precision<MathT>()) * (dataset_norm[curr_row] == centers_norm[curr_n]));
+        if (sqrt) {
+          curr_distance = raft::sqrt<MathT>(curr_distance * (curr_distance > 0)); 
+        } 
+      }
+      if (curr_distance < min_distance) {
+        min_distance = curr_distance;
+        location = curr_n; 
+      }
+    }
+    labels[curr_row] = location; 
+  }
+}
+
+template <bool sqrt, 
+          typename MathT, 
+          typename IdxT,
+          typename LabelT>
+__global__ void  L2_distance_kernel_small_K_v0(
+                            const MathT* dataset, // dataset [n_rows, dim]
+                            const MathT* centers, // centers [n_clusters, dim]
+                            const MathT* dataset_norm, // dataset_norm [n_rows] 
+                            const MathT* centers_norm,  // centers_norm [n_clusters]
+                            IdxT n_rows,
+                            IdxT n_clusters,
+                            IdxT dim,
+                            LabelT* labels // [n_rows]
+                            )
+{
+  __shared__ MathT min_distance; 
+  __shared__ LabelT min_location;
+  __shared__ MathT curr_dataset_norm; 
+  __shared__ MathT curr_centers_norm; 
+
+  int curr_num_row = blockIdx.x;
+  int curr_num_cluster = threadIdx.x; 
+
+  if (threadIdx.x == 0) {
+    min_distance = std::numeric_limits<MathT>::max(); 
+    min_location = 0; 
+    curr_dataset_norm = dataset_norm[curr_num_row]; 
+    curr_centers_norm = centers_norm[curr_num_cluster]; 
+  }
+  
+  __syncthreads(); 
+
+  MathT curr_distance = curr_dataset_norm + curr_centers_norm; 
+  #pragma unroll 
+  for (int curr_k = 0; curr_k < dim; curr_k++) {
+    curr_distance -= 2 * dataset[curr_num_row * dim + curr_k] * centers[curr_num_cluster * dim + curr_k]; 
+    /**
+    * Self-neighboring points should have (aNorm == bNorm) == accVal and the dot product (accVal)
+    * can sometimes have round-off errors, which will cause (aNorm == bNorm) ~ accVal instead.
+    */
+    curr_distance = curr_distance * !((curr_distance * curr_distance < raft::distance::detail::ops::get_clamp_precision<MathT>()) * (curr_dataset_norm == curr_centers_norm));
+    if (sqrt) {
+      curr_distance = raft::sqrt<MathT>(curr_distance * (curr_distance > 0)); 
+    } 
+  }
+
+  MathT ret_distance = atomicMin(&min_distance, curr_distance); 
+  if (ret_distance > curr_distance) {
+    atomicExch(&min_location, threadIdx.x);
+  }
+
+  __syncthreads();
+
+  if (threadIdx.x == 0) {
+    labels[curr_num_row] = min_location; 
+  }
+}
+
+// IvfPq/f32_f32_i64.build_extend_search/1
 
 /**
  * @brief Predict labels for the dataset; floating-point types only.
@@ -98,6 +330,7 @@ inline std::enable_if_t<std::is_floating_point_v<MathT>> predict_core(
   switch (params.metric) {
     case raft::distance::DistanceType::L2Expanded:
     case raft::distance::DistanceType::L2SqrtExpanded: {
+#ifndef TEST_KENREL_NN_FUSED_REDUCE
       auto workspace = raft::make_device_mdarray<char, IdxT>(
         handle, mr, make_extents<IdxT>((sizeof(int)) * n_rows));
 
@@ -135,6 +368,84 @@ inline std::enable_if_t<std::is_floating_point_v<MathT>> predict_core(
                         minClusterAndDistance.data_handle() + n_rows,
                         labels,
                         raft::compose_op<raft::cast_op<LabelT>, raft::key_op>());
+#else 
+      // Assuming pq_bit [4, 8] == n_clusters [16, 256]; pq_length/dim [1, 24]
+      // https://github.com/rapidsai/raft/issues/1901
+      if (n_clusters <= 256 && dim <= 24) {
+        printf("!");
+        auto centroidsNorm =
+          raft::make_device_mdarray<MathT, IdxT>(handle, mr, make_extents<IdxT>(n_clusters));
+        raft::linalg::rowNorm<MathT, IdxT>(
+          centroidsNorm.data_handle(), centers, dim, n_clusters, raft::linalg::L2Norm, true, stream);
+        dim3 threads_per_block(256, 1, 1); 
+        dim3 num_blocks(ceil(1.0 * n_rows / 256), 1, 1); 
+        // if (params.metric == raft::distance::DistanceType::L2Expanded)
+        //   L2_distance_kernel_small_K_v1_coarsening<false><<<num_blocks,threads_per_block,sizeof(MathT)*dim*n_clusters,stream>>>(
+        //     dataset, centers, dataset_norm, centroidsNorm.data_handle(), n_rows, n_clusters, dim, labels 
+        //   );
+        // else 
+        //   L2_distance_kernel_small_K_v1_coarsening<true><<<num_blocks,threads_per_block,sizeof(MathT)*dim*n_clusters,stream>>>(
+        //     dataset, centers, dataset_norm, centroidsNorm.data_handle(), n_rows, n_clusters, dim, labels 
+        //   );
+
+        if (params.metric == raft::distance::DistanceType::L2Expanded)
+          L2_distance_kernel_small_K_v1_opt<false><<<num_blocks,threads_per_block,sizeof(MathT)*dim*(n_clusters+256),stream>>>(
+            dataset, centers, dataset_norm, centroidsNorm.data_handle(), n_rows, n_clusters, dim, labels 
+          );
+        else 
+          L2_distance_kernel_small_K_v1_opt<true><<<num_blocks,threads_per_block,sizeof(MathT)*dim*(n_clusters+256),stream>>>(
+            dataset, centers, dataset_norm, centroidsNorm.data_handle(), n_rows, n_clusters, dim, labels 
+          );
+
+        // dim3 threads_per_block(n_clusters, 1, 1); 
+        // dim3 num_blocks(n_rows, 1, 1); 
+        // L2_distance_kernel_small_K_v2<false><<<num_blocks,threads_per_block,0,stream>>>(
+        //   dataset, centers, dataset_norm, centroidsNorm.data_handle(), n_rows, n_clusters, dim, labels 
+        // );
+
+        resource::sync_stream(handle);
+      } else {
+              auto workspace = raft::make_device_mdarray<char, IdxT>(
+        handle, mr, make_extents<IdxT>((sizeof(int)) * n_rows));
+
+      auto minClusterAndDistance = raft::make_device_mdarray<raft::KeyValuePair<IdxT, MathT>, IdxT>(
+        handle, mr, make_extents<IdxT>(n_rows));
+      raft::KeyValuePair<IdxT, MathT> initial_value(0, std::numeric_limits<MathT>::max());
+      thrust::fill(resource::get_thrust_policy(handle),
+                   minClusterAndDistance.data_handle(),
+                   minClusterAndDistance.data_handle() + minClusterAndDistance.size(),
+                   initial_value);
+
+      auto centroidsNorm =
+        raft::make_device_mdarray<MathT, IdxT>(handle, mr, make_extents<IdxT>(n_clusters));
+      raft::linalg::rowNorm<MathT, IdxT>(
+        centroidsNorm.data_handle(), centers, dim, n_clusters, raft::linalg::L2Norm, true, stream);
+
+      raft::distance::fusedL2NNMinReduce<MathT, raft::KeyValuePair<IdxT, MathT>, IdxT>(
+        minClusterAndDistance.data_handle(),
+        dataset,
+        centers,
+        dataset_norm,
+        centroidsNorm.data_handle(),
+        n_rows,
+        n_clusters,
+        dim,
+        (void*)workspace.data_handle(),
+        (params.metric == raft::distance::DistanceType::L2Expanded) ? false : true,
+        false,
+        stream);
+
+      // todo(lsugy): use KVP + iterator in caller.
+      // Copy keys to output labels
+      thrust::transform(resource::get_thrust_policy(handle),
+                        minClusterAndDistance.data_handle(),
+                        minClusterAndDistance.data_handle() + n_rows,
+                        labels,
+                        raft::compose_op<raft::cast_op<LabelT>, raft::key_op>());
+      }
+
+#endif 
+
       break;
     }
     case raft::distance::DistanceType::InnerProduct: {

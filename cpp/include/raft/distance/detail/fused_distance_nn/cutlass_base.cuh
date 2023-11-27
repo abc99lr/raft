@@ -41,6 +41,7 @@
 #include <raft/distance/detail/fused_distance_nn/gemm.h>                    // FusedDistanceNNGemm
 #include <raft/util/cudart_utils.hpp>   // getMultiProcessorCount
 #include <raft/util/cutlass_utils.cuh>  // RAFT_CUTLASS_TRY
+#include <raft/common/nvtx.hpp>
 
 namespace raft {
 namespace distance {
@@ -73,6 +74,10 @@ void cutlassFusedDistanceNN(const DataT* x,
                             KVPReduceOpT pairRedOp,
                             cudaStream_t stream)
 {
+  // printf("&");
+
+  common::nvtx::range<common::nvtx::domain::raft> fun_scope(
+    "cutlassFusedDistanceNN(%d, %d, %d)", m, n, k);
   using EpilogueOutputOp = cutlass::epilogue::thread::FusedDistanceNNEpilogueElementwise<
     DataT,  // ElementC_
     AccT,   // ElementAccumulator_
@@ -150,8 +155,18 @@ void cutlassFusedDistanceNN(const DataT* x,
   RAFT_CUTLASS_TRY(fusedDistanceNN_op.can_implement(arguments));
   // Initialize CUTLASS kernel with arguments and workspace pointer
   RAFT_CUTLASS_TRY(fusedDistanceNN_op.initialize(arguments, workspace.data(), stream));
+
+  // cudaEvent_t start, stop;
+  // cudaEventCreate(&start);
+  // cudaEventCreate(&stop);
+  // cudaEventRecord(start);
   // Launch initialized CUTLASS kernel
   RAFT_CUTLASS_TRY(fusedDistanceNN_op.run(stream));
+  // cudaEventRecord(stop);
+  // cudaEventSynchronize(stop);
+  // float milliseconds = 0;
+  // cudaEventElapsedTime(&milliseconds, start, stop);
+  // printf("%lf ", milliseconds);
 }
 
 };  // namespace detail
