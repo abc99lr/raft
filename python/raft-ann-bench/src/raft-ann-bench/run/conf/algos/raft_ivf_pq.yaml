@@ -5,13 +5,13 @@ constraints:
 groups:
   base:
     build:
-      nlist: [1024, 2048, 4096, 8192]
-      pq_dim: [64, 32]
-      pq_bits: [8, 6, 5, 4]
-      ratio: [10, 25]
+      nlist: [50000]
+      pq_dim: [96]
+      pq_bits: [5]
+      ratio: [10]
       niter: [25]
     search:
-      nprobe: [1, 5, 10, 50, 100, 200]
+      nprobe: [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000]
       internalDistanceDtype: ["float"]
-      smemLutDtype: ["float", "fp8", "half"]
-      refine_ratio: [1, 2, 4]
+      smemLutDtype: ["float"]
+      refine_ratio: [1]

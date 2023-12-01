@@ -13,6 +13,14 @@
   groundtruth_neighbors_file: deep-1B/groundtruth.neighbors.ibin
   distance: inner_product
 
+- name: deep-100M
+  base_file: deep-1B/base.1B.fbin
+  query_file: deep-1B/query.public.10K.fbin
+  subset_size: 100000000
+  dims: 96
+  groundtruth_neighbors_file: deep-100M/groundtruth.neighbors.ibin
+  distance: euclidean
+
 - name: bigann-100M
   base_file: bigann-100M/base.1B.u8bin
   subset_size: 100000000

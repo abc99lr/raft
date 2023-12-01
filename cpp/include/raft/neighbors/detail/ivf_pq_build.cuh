@@ -59,6 +59,7 @@
 
 #include <memory>
 #include <variant>
+#include "cuda_profiler_api.h"
 
 namespace raft::neighbors::ivf_pq::detail {
 
@@ -402,10 +403,11 @@ void train_per_subset(raft::resources const& handle,
 {
   auto stream        = resource::get_cuda_stream(handle);
   auto device_memory = resource::get_workspace_resource(handle);
-
+  
+  size_t n_rows_sampled = n_rows * 0.05; 
   rmm::device_uvector<float> pq_centers_tmp(index.pq_centers().size(), stream, device_memory);
-  rmm::device_uvector<float> sub_trainset(n_rows * size_t(index.pq_len()), stream, device_memory);
-  rmm::device_uvector<uint32_t> sub_labels(n_rows, stream, device_memory);
+  rmm::device_uvector<float> sub_trainset(n_rows_sampled * size_t(index.pq_len()), stream, device_memory);
+  rmm::device_uvector<uint32_t> sub_labels(n_rows_sampled, stream, device_memory);
 
   rmm::device_uvector<uint32_t> pq_cluster_sizes(index.pq_book_size(), stream, device_memory);
 
@@ -416,7 +418,7 @@ void train_per_subset(raft::resources const& handle,
     // Get the rotated cluster centers for each training vector.
     // This will be subtracted from the input vectors afterwards.
     utils::copy_selected<float, float, size_t, uint32_t>(
-      n_rows,
+      n_rows_sampled,
       index.pq_len(),
       index.centers_rot().data_handle() + index.pq_len() * j,
       labels,
@@ -432,7 +434,7 @@ void train_per_subset(raft::resources const& handle,
                  true,
                  false,
                  index.pq_len(),
-                 n_rows,
+                 n_rows_sampled,
                  index.dim(),
                  &alpha,
                  index.rotation_matrix().data_handle() + index.dim() * index.pq_len() * j,
@@ -446,12 +448,12 @@ void train_per_subset(raft::resources const& handle,
 
     // train PQ codebook for this subspace
     auto sub_trainset_view =
-      raft::make_device_matrix_view<const float, IdxT>(sub_trainset.data(), n_rows, index.pq_len());
+      raft::make_device_matrix_view<const float, IdxT>(sub_trainset.data(), n_rows_sampled, index.pq_len());
     auto centers_tmp_view = raft::make_device_matrix_view<float, IdxT>(
       pq_centers_tmp.data() + index.pq_book_size() * index.pq_len() * j,
       index.pq_book_size(),
       index.pq_len());
-    auto sub_labels_view = raft::make_device_vector_view<uint32_t, IdxT>(sub_labels.data(), n_rows);
+    auto sub_labels_view = raft::make_device_vector_view<uint32_t, IdxT>(sub_labels.data(), n_rows_sampled);
     auto cluster_sizes_view =
       raft::make_device_vector_view<uint32_t, IdxT>(pq_cluster_sizes.data(), index.pq_book_size());
     raft::cluster::kmeans_balanced_params kmeans_params;
@@ -1885,6 +1887,8 @@ auto build(raft::resources const& handle,
 
     set_centers(handle, &index, cluster_centers);
 
+    RAFT_CUDA_TRY(cudaProfilerStart()); 
+
     // Train PQ codebooks
     switch (index.codebook_kind()) {
       case codebook_gen::PER_SUBSPACE:
@@ -1908,6 +1912,8 @@ auto build(raft::resources const& handle,
       default: RAFT_FAIL("Unreachable code");
     }
   }
+
+  RAFT_CUDA_TRY(cudaProfilerStop());
 
   // add the data if necessary
   if (params.add_data_on_build) {
