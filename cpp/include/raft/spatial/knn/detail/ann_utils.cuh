@@ -26,11 +26,15 @@
 #include <rmm/device_scalar.hpp>
 #include <rmm/device_uvector.hpp>
 #include <rmm/resource_ref.hpp>
+#include <rmm/mr/host/pinned_memory_resource.hpp>
 
 #include <cuda_fp16.hpp>
 
+#include <nvtx3/nvToolsExt.h>
+
 #include <memory>
 #include <optional>
+#include <cstring>
 
 namespace raft::spatial::knn::detail::utils {
 
@@ -398,6 +402,36 @@ template <typename T>
 struct batch_load_iterator {
   using size_type = size_t;
 
+  struct staging_buffer {
+    staging_buffer() : n_(0)
+    {
+      res_ = new rmm::mr::pinned_memory_resource();
+    }
+
+    ~staging_buffer() 
+    {
+      std::cout << "deallocating\n";
+      if (n_ != 0)
+        res_->deallocate(arr_, n_ * sizeof(T));
+      delete res_; 
+    }
+
+    void allocate(size_type n) 
+    {
+      n_ = n;
+      arr_ = static_cast<T*>(res_->allocate(n_ * sizeof(T)));
+    }
+
+    auto data() -> T* { return arr_; }
+    [[nodiscard]] auto size() -> size_type { return n_; }
+
+    private: 
+      rmm::mr::host_memory_resource* res_; 
+      T* arr_;
+      size_type n_;
+
+  };
+
   /** A single batch of data residing in device memory. */
   struct batch {
     /** Logical width of a single row in a batch, in elements of type `T`. */
@@ -417,7 +451,8 @@ struct batch_load_iterator {
           size_type row_width,
           size_type batch_size,
           rmm::cuda_stream_view stream,
-          rmm::device_async_resource_ref mr)
+          rmm::device_async_resource_ref mr,
+          bool staging_prefetch = false)
       : stream_(stream),
         buf_(0, stream, mr),
         source_(source),
@@ -427,7 +462,8 @@ struct batch_load_iterator {
         batch_size_(std::min(batch_size, n_rows)),
         pos_(std::nullopt),
         n_iters_(raft::div_rounding_up_safe(n_rows, batch_size)),
-        needs_copy_(false)
+        needs_copy_(false),
+        staging_prefetch_(staging_prefetch)
     {
       if (source_ == nullptr) { return; }
       cudaPointerAttributes attr;
@@ -437,6 +473,19 @@ struct batch_load_iterator {
         buf_.resize(row_width_ * batch_size_, stream);
         dev_ptr_    = buf_.data();
         needs_copy_ = true;
+        batch_len_  = batch_size_; 
+        if (staging_prefetch_) {
+          std::cout << "here in side batch\n";
+          stg_buf_0_.allocate(row_width_ * batch_size_); 
+          stg_buf_1_.allocate(row_width_ * batch_size_); 
+          current_stg_buf_ = &stg_buf_0_; 
+          prefetch_stg_buf_ = &stg_buf_1_; 
+          // std::cout << "batch const \n";
+          // RAFT_CUDA_TRY(cudaHost);
+          // Copy the first chunk to the staging buffer 
+          // std::memcpy(current_stg_buf_->data(), source_, batch_size_ * row_width_);
+          // std::cout << "first memcpy done\n";
+        }
       }
     }
     rmm::cuda_stream_view stream_;
@@ -447,6 +496,11 @@ struct batch_load_iterator {
     size_type batch_size_;
     size_type n_iters_;
     bool needs_copy_;
+    bool staging_prefetch_;
+    staging_buffer stg_buf_0_;
+    staging_buffer stg_buf_1_; 
+    staging_buffer* current_stg_buf_; 
+    staging_buffer* prefetch_stg_buf_; 
 
     std::optional<size_type> pos_;
     size_type batch_len_;
@@ -460,6 +514,7 @@ struct batch_load_iterator {
      */
     void load(const size_type& pos)
     {
+      // std::cout << "L";
       // No-op if the data is already loaded, or it's the end of the input.
       if (pos == pos_ || pos >= n_iters_) { return; }
       pos_.emplace(pos);
@@ -471,11 +526,41 @@ struct batch_load_iterator {
                          size_t(offset()),
                          size_t(size()),
                          size_t(row_width()));
-          copy(dev_ptr_, source_ + offset() * row_width(), size() * row_width(), stream_);
+          if (staging_prefetch_) {
+            copy(dev_ptr_, current_stg_buf_->data(), size() * row_width(), stream_);
+          //   nvtxRangePushA("Staging copy");
+          //   if (offset() + size() < n_rows_) {
+          //     size_type prefetch_size = std::min(batch_size_, n_rows_ - std::min(offset() + size(), n_rows_));
+          //     std::memcpy(prefetch_stg_buf_->data(), source_ + (offset() + size()) * row_width(), prefetch_size * row_width());
+          //   }
+          //   nvtxRangePop();
+          //   // stream_.synchronize();
+          //   std::swap(current_stg_buf_, prefetch_stg_buf_);
+          } else {
+            copy(dev_ptr_, source_ + offset() * row_width(), size() * row_width(), stream_);
+          }
         }
       } else {
         dev_ptr_ = const_cast<T*>(source_) + offset() * row_width();
       }
+    }
+
+    void prefetch(const size_type& pos) 
+    {
+      // std::cout <<"P"; 
+      if (pos >= n_iters_ || !staging_prefetch_ || !needs_copy_) {
+        return; 
+      }
+      // batch_len_ = std::min(batch_size_, n_rows_ - std::min(offset(), n_rows_));
+      // copy(dev_ptr_, current_stg_buf_->data(), size() * row_width(), stream_);
+      nvtxRangePushA("Staging copy");
+      if (offset() + size() < n_rows_) {
+        size_type prefetch_size = std::min(batch_size_, n_rows_ - std::min(offset() + size(), n_rows_));
+        std::memcpy(prefetch_stg_buf_->data(), source_ + (offset() + size()) * row_width(), prefetch_size * row_width());
+      }
+      nvtxRangePop();
+      // stream_.synchronize();
+      std::swap(current_stg_buf_, prefetch_stg_buf_);
     }
   };
 
@@ -503,8 +588,9 @@ struct batch_load_iterator {
                       size_type row_width,
                       size_type batch_size,
                       rmm::cuda_stream_view stream,
-                      rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource())
-    : cur_batch_(new batch(source, n_rows, row_width, batch_size, stream, mr)), cur_pos_(0)
+                      rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource(),
+                      bool staging_prefetch = false)
+    : cur_batch_(new batch(source, n_rows, row_width, batch_size, stream, mr, staging_prefetch)), cur_pos_(0)
   {
   }
   /**
@@ -512,6 +598,10 @@ struct batch_load_iterator {
    * (i.e. the source is inaccessible from the device).
    */
   [[nodiscard]] auto does_copy() const -> bool { return cur_batch_->does_copy(); }
+
+  void prefetch() {
+    cur_batch_->prefetch(cur_pos_+1);
+  }
   /** Reset the iterator position to `begin()` */
   void reset() { cur_pos_ = 0; }
   /** Reset the iterator position to `end()` */
