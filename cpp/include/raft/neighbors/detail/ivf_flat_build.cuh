@@ -21,8 +21,8 @@
 #include <raft/core/mdarray.hpp>
 #include <raft/core/nvtx.hpp>
 #include <raft/core/operators.hpp>
-#include <raft/core/resource/cuda_stream.hpp>
 #include <raft/core/resource/cuda_event.hpp>
+#include <raft/core/resource/cuda_stream.hpp>
 #include <raft/core/resources.hpp>
 #include <raft/linalg/add.cuh>
 #include <raft/linalg/map.cuh>
@@ -36,6 +36,7 @@
 #include <raft/stats/histogram.cuh>
 #include <raft/util/pow2_utils.cuh>
 
+#include <rmm/cuda_stream.hpp>
 #include <rmm/cuda_stream_view.hpp>
 
 #include <cstdint>
@@ -190,22 +191,23 @@ void extend(raft::resources const& handle,
   constexpr size_t kReasonableMaxBatchSize = 65536;
   size_t max_batch_size                    = std::min<size_t>(n_rows, kReasonableMaxBatchSize);
 
-  rmm::cuda_stream copy_stream; 
-  // raft::resource::cuda_event_resource copy_done; 
+  rmm::cuda_stream copy_stream;
+  // raft::resource::cuda_event_resource copy_done;
   cudaEvent_t copy_done;
-  cudaEventCreate(&copy_done); 
-  
+  cudaEventCreate(&copy_done);
+
   // Predict the cluster labels for the new data, in batches if necessary
   utils::batch_load_iterator<T> vec_batches(new_vectors,
                                             n_rows,
                                             index->dim(),
                                             max_batch_size,
                                             copy_stream.view(),
-                                            resource::get_workspace_resource(handle), true);
+                                            resource::get_workspace_resource(handle),
+                                            true);
   vec_batches.prefetch();
-  auto start = std::chrono::high_resolution_clock::now(); 
+  // auto start = std::chrono::high_resolution_clock::now();
   for (const auto& batch : vec_batches) {
-    // Copy happens here 
+    // Copy happens here
     cudaEventRecord(copy_done, copy_stream.value());
     cudaStreamWaitEvent(stream.value(), copy_done);
     auto batch_data_view =
@@ -218,13 +220,12 @@ void extend(raft::resources const& handle,
                                             orig_centroids_view,
                                             batch_labels_view,
                                             utils::mapping<float>{});
-    vec_batches.prefetch(); 
-    // stream.synchronize();
+    vec_batches.prefetch();
   }
-  cudaDeviceSynchronize();
-  auto end = std::chrono::high_resolution_clock::now();
-  std::chrono::duration<double, std::milli> duration = end - start;
-  std::cout << "Elapsed time: " << duration.count() << " milliseconds" << std::endl;
+  // cudaDeviceSynchronize();
+  // auto end = std::chrono::high_resolution_clock::now();
+  // std::chrono::duration<double, std::milli> duration = end - start;
+  // std::cout << "Elapsed time: " << duration.count() << " milliseconds" << std::endl;
 
   auto* list_sizes_ptr    = index->list_sizes().data_handle();
   auto old_list_sizes_dev = raft::make_device_vector<uint32_t, IdxT>(handle, n_lists);
@@ -284,12 +285,22 @@ void extend(raft::resources const& handle,
   // we'll rebuild the `list_sizes_ptr` in the following kernel, using it as an atomic counter.
   raft::copy(list_sizes_ptr, old_list_sizes_dev.data_handle(), n_lists, stream);
 
-  utils::batch_load_iterator<IdxT> vec_indices(
-    new_indices, n_rows, 1, max_batch_size, copy_stream.view(), resource::get_workspace_resource(handle), true);
+  utils::batch_load_iterator<IdxT> vec_indices(new_indices,
+                                               n_rows,
+                                               1,
+                                               max_batch_size,
+                                               copy_stream.view(),
+                                               resource::get_workspace_resource(handle),
+                                               true);
+  vec_batches.reset();
+  vec_batches.prefetch();
   utils::batch_load_iterator<IdxT> idx_batch = vec_indices.begin();
   size_t next_report_offset                  = 0;
   size_t d_report_offset                     = n_rows * 5 / 100;
   for (const auto& batch : vec_batches) {
+    cudaEventRecord(copy_done, copy_stream.value());
+    cudaStreamWaitEvent(stream.value(), copy_done);
+    // std::cout << "batch size " << batch.size() << " ind dim " << index->dim() << "\n";
     auto batch_data_view =
       raft::make_device_matrix_view<const T, IdxT>(batch.data(), batch.size(), index->dim());
     // Kernel to insert the new vectors
@@ -307,6 +318,7 @@ void extend(raft::resources const& handle,
                                            index->veclen(),
                                            batch.offset());
     RAFT_CUDA_TRY(cudaPeekAtLastError());
+    vec_batches.prefetch();
 
     if (batch.offset() > next_report_offset) {
       float progress = batch.offset() * 100.0f / n_rows;
