@@ -26,7 +26,6 @@
 #include <gtest/gtest.h>
 
 namespace raft::spatial::knn::detail::utils {
-
 template <typename IdxT>
 struct AnnBatchLoadIteratorInputs {
   IdxT n_rows;
@@ -113,6 +112,7 @@ const std::vector<AnnBatchLoadIteratorInputs<int64_t>> inputs = {
   // test device input, batch iterator should directly
   {10000, 8, 65536, false, false},
   {100000, 8, 65536, false, false},
+  {100000, 16, 65536, false, false},
   {1000000, 8, 65536, false, false},
   {10000000, 8, 65536, false, false},
   {10000000, 8, 524288, false, false},
@@ -120,6 +120,7 @@ const std::vector<AnnBatchLoadIteratorInputs<int64_t>> inputs = {
   // test host input without prefetching, batch iterator requires pageable copy
   {10000, 8, 65536, true, false},
   {100000, 8, 65536, true, false},
+  {100000, 16, 65536, false, false},
   {1000000, 8, 65536, true, false},
   {10000000, 8, 65536, true, false},
   {10000000, 8, 524288, true, false},
@@ -127,6 +128,7 @@ const std::vector<AnnBatchLoadIteratorInputs<int64_t>> inputs = {
   // test host input with prefetching, batch iterator requires pageable copy
   {10000, 8, 65536, true, true},
   {100000, 8, 65536, true, true},
+  {100000, 16, 65536, false, false},
   {1000000, 8, 65536, true, true},
   {10000000, 8, 65536, true, true},
   {10000000, 8, 524288, true, true},
