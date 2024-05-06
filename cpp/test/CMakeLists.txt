@@ -346,10 +346,13 @@ if(BUILD_TESTS)
     NAME
     NEIGHBORS_TEST
     PATH
-    # test/neighbors/knn.cu test/neighbors/fused_l2_knn.cu test/neighbors/tiled_knn.cu
-    # test/neighbors/haversine.cu test/neighbors/ball_cover.cu
-    # test/neighbors/epsilon_neighborhood.cu test/neighbors/refine.cu
-    test/neighbors/batch_load_iterator.cu
+    test/neighbors/knn.cu
+    test/neighbors/fused_l2_knn.cu
+    test/neighbors/tiled_knn.cu
+    test/neighbors/haversine.cu
+    test/neighbors/ball_cover.cu
+    test/neighbors/epsilon_neighborhood.cu
+    test/neighbors/refine.cu
     LIB
     EXPLICIT_INSTANTIATE_ONLY
   )
