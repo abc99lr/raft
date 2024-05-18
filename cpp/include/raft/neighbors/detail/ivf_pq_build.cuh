@@ -1572,16 +1572,20 @@ void extend(raft::resources const& handle,
   }
 
   rmm::cuda_stream copy_stream;
-  cudaEvent_t copy_done;
-  cudaEventCreate(&copy_done);
+
   // Predict the cluster labels for the new data, in batches if necessary
-  utils::batch_load_iterator<T> vec_batches(
-    new_vectors, n_rows, index->dim(), max_batch_size, copy_stream.view(), device_memory, true);
+  bool prefetch_batches = true;
+  utils::batch_load_iterator<T> vec_batches(new_vectors,
+                                            n_rows,
+                                            index->dim(),
+                                            max_batch_size,
+                                            copy_stream.view(),
+                                            device_memory,
+                                            prefetch_batches);
   // Release the placeholder memory, because we don't intend to allocate any more long-living
   // temporary buffers before we allocate the index data.
   // This memory could potentially speed up UVM accesses, if any.
   placeholder_list.reset();
-  vec_batches.prefetch();
   {
     // The cluster centers in the index are stored padded, which is not acceptable by
     // the kmeans_balanced::predict. Thus, we need the restructuring copy.
@@ -1595,6 +1599,7 @@ void extend(raft::resources const& handle,
                                     n_clusters,
                                     cudaMemcpyDefault,
                                     stream));
+    vec_batches.prefetch();
     for (const auto& batch : vec_batches) {
       auto batch_data_view = raft::make_device_matrix_view<const T, internal_extents_t>(
         batch.data(), batch.size(), index->dim());
@@ -1602,8 +1607,6 @@ void extend(raft::resources const& handle,
         new_data_labels.data() + batch.offset(), batch.size());
       auto centers_view = raft::make_device_matrix_view<const float, internal_extents_t>(
         cluster_centers.data(), n_clusters, index->dim());
-      cudaEventRecord(copy_done, copy_stream.value());
-      cudaStreamWaitEvent(stream.value(), copy_done);
       raft::cluster::kmeans_balanced_params kmeans_params;
       kmeans_params.metric = index->metric();
       raft::cluster::kmeans_balanced::predict(handle,
@@ -1613,6 +1616,9 @@ void extend(raft::resources const& handle,
                                               batch_labels_view,
                                               utils::mapping<float>{});
       vec_batches.prefetch();
+      // User needs to make sure kernel finishes its work before we overwrite batch in the next
+      // iteration if different streams are used for kernel and copy.
+      resource::sync_stream(handle);
     }
   }
 
@@ -1658,8 +1664,6 @@ void extend(raft::resources const& handle,
   vec_batches.prefetch();
   for (const auto& vec_batch : vec_batches) {
     const auto& idx_batch = *idx_batches++;
-    cudaEventRecord(copy_done, copy_stream.value());
-    cudaStreamWaitEvent(stream.value(), copy_done);
     process_and_fill_codes(handle,
                            *index,
                            vec_batch.data(),
@@ -1670,6 +1674,9 @@ void extend(raft::resources const& handle,
                            IdxT(vec_batch.size()),
                            device_memory);
     vec_batches.prefetch();
+    // User needs to make sure kernel finishes its work before we overwrite batch in the next
+    // iteration if different streams are used for kernel and copy.
+    resource::sync_stream(handle);
   }
 }
 

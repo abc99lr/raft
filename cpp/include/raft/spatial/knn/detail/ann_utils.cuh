@@ -26,15 +26,10 @@
 #include <rmm/cuda_stream_view.hpp>
 #include <rmm/device_scalar.hpp>
 #include <rmm/device_uvector.hpp>
-#include <rmm/mr/host/pinned_memory_resource.hpp>
 #include <rmm/resource_ref.hpp>
 
 #include <cuda_fp16.hpp>
 
-#include <omp.h>
-
-#include <cstring>
-#include <iostream>
 #include <memory>
 #include <optional>
 
@@ -404,41 +399,12 @@ template <typename T>
 struct batch_load_iterator {
   using size_type = size_t;
 
-  struct staging_buffer {
-    staging_buffer() : n_(0) { res_ = new rmm::mr::pinned_memory_resource(); }
-
-    ~staging_buffer()
-    {
-      if (n_ != 0) res_->deallocate(arr_, n_ * sizeof(T));
-      delete res_;
-    }
-
-    void allocate(size_type n)
-    {
-      n_   = n;
-      arr_ = static_cast<T*>(res_->allocate(n_ * sizeof(T)));
-    }
-
-    auto data() -> T* { return arr_; }
-    [[nodiscard]] auto size() -> size_type { return n_; }
-
-   private:
-    rmm::mr::host_memory_resource* res_;
-    T* arr_;
-    size_type n_;
-  };
-
   /** A single batch of data residing in device memory. */
   struct batch {
     /** Logical width of a single row in a batch, in elements of type `T`. */
     [[nodiscard]] auto row_width() const -> size_type { return row_width_; }
     /** Logical offset of the batch, in rows (`row_width()`) */
     [[nodiscard]] auto offset() const -> size_type { return pos_.value_or(0) * batch_size_; }
-    /** Logical prefetch offset of the batch, in rows (`row_width()`) */
-    [[nodiscard]] auto prefetch_offset() const -> size_type
-    {
-      return prefetch_stg_buf_pos_.value_or(0) * batch_size_;
-    }
     /** Logical size of the batch, in rows (`row_width()`) */
     [[nodiscard]] auto size() const -> size_type { return batch_len_; }
     /** Logical size of the batch, in rows (`row_width()`) */
@@ -453,57 +419,51 @@ struct batch_load_iterator {
           size_type batch_size,
           rmm::cuda_stream_view stream,
           rmm::device_async_resource_ref mr,
-          bool staging_prefetch = false)
+          bool prefetch = false)
       : stream_(stream),
-        buf_(0, stream, mr),
+        buf_0_(0, stream, mr),
+        buf_1_(0, stream, mr),
         source_(source),
         dev_ptr_(nullptr),
         n_rows_(n_rows),
         row_width_(row_width),
         batch_size_(std::min(batch_size, n_rows)),
         pos_(std::nullopt),
-        current_stg_buf_pos_(std::nullopt),
-        prefetch_stg_buf_pos_(std::nullopt),
+        prefetch_pos_(std::nullopt),
         n_iters_(raft::div_rounding_up_safe(n_rows, batch_size)),
         needs_copy_(false),
-        staging_prefetch_(staging_prefetch)
+        prefetch_(prefetch)
     {
       if (source_ == nullptr) { return; }
       cudaPointerAttributes attr;
       RAFT_CUDA_TRY(cudaPointerGetAttributes(&attr, source_));
       dev_ptr_ = reinterpret_cast<T*>(attr.devicePointer);
       if (dev_ptr_ == nullptr) {
-        buf_.resize(row_width_ * batch_size_, stream);
-        dev_ptr_    = buf_.data();
+        buf_0_.resize(row_width_ * batch_size_, stream);
+        dev_ptr_    = buf_0_.data();
         needs_copy_ = true;
-        batch_len_  = batch_size_;
-        if (staging_prefetch_) {
-          stg_buf_0_.allocate(row_width_ * batch_size_);
-          stg_buf_1_.allocate(row_width_ * batch_size_);
-          current_stg_buf_  = &stg_buf_0_;
-          prefetch_stg_buf_ = &stg_buf_1_;
+        if (prefetch_) {
+          buf_1_.resize(row_width_ * batch_size_, stream);
+          prefetch_dev_ptr_ = buf_1_.data();
         }
       }
     }
     rmm::cuda_stream_view stream_;
-    rmm::device_uvector<T> buf_;
+    rmm::device_uvector<T> buf_0_;
+    rmm::device_uvector<T> buf_1_;
     const T* source_;
     size_type n_rows_;
     size_type row_width_;
     size_type batch_size_;
     size_type n_iters_;
     bool needs_copy_;
-    bool staging_prefetch_;
-    staging_buffer stg_buf_0_;
-    staging_buffer stg_buf_1_;
-    staging_buffer* current_stg_buf_;
-    staging_buffer* prefetch_stg_buf_;
-    std::optional<size_type> current_stg_buf_pos_;
-    std::optional<size_type> prefetch_stg_buf_pos_;
+    bool prefetch_;
 
     std::optional<size_type> pos_;
+    std::optional<size_type> prefetch_pos_;
     size_type batch_len_;
     T* dev_ptr_;
+    T* prefetch_dev_ptr_;
 
     friend class batch_load_iterator<T>;
 
@@ -524,8 +484,8 @@ struct batch_load_iterator {
                          size_t(offset()),
                          size_t(size()),
                          size_t(row_width()));
-          if (current_stg_buf_pos_ == pos_ && staging_prefetch_) {
-            copy(dev_ptr_, current_stg_buf_->data(), size() * row_width(), stream_);
+          if (prefetch_ && prefetch_pos_ == pos_) {
+            std::swap(dev_ptr_, prefetch_dev_ptr_);
           } else {
             copy(dev_ptr_, source_ + offset() * row_width(), size() * row_width(), stream_);
           }
@@ -535,38 +495,23 @@ struct batch_load_iterator {
       }
     }
 
-    void prefetch_to_staging_buf(const size_type& pos)
+    void prefetch_load(const size_type& pos)
     {
-      if (pos >= n_iters_ || !staging_prefetch_ || !needs_copy_) { return; }
-      prefetch_stg_buf_pos_.emplace(pos);
-      raft::common::nvtx::push_range("batch_load_iterator::prefetch_to_staging_buf");
-      size_type prefetch_size =
-        std::min(batch_size_, n_rows_ - std::min(prefetch_offset(), n_rows_));
-      // Use multiple host thread for the user to staging buffer copy.
-      auto num_threads = std::min(omp_get_max_threads(), 4);
-// std::cout << "num_threads " << num_threads;
-#pragma omp parallel num_threads(num_threads)
-      {
-        auto thread_id   = omp_get_thread_num();
-        auto num_threads = omp_get_num_threads();
-
-        size_type thread_chunk_size = prefetch_size / num_threads;
-        size_type thread_start      = thread_id * thread_chunk_size;
-        size_type thread_end =
-          (thread_id == num_threads - 1) ? prefetch_size : thread_start + thread_chunk_size;
-        std::memcpy(prefetch_stg_buf_->data() + thread_start,
-                    source_ + prefetch_offset() * row_width() + thread_start,
-                    (thread_end - thread_start) * row_width() * sizeof(T));
-      }
-      // std::memcpy(prefetch_stg_buf_->data(),
-      //             source_ + prefetch_offset() * row_width(),
-      //             prefetch_size * row_width() * sizeof(T));
+      if (pos >= n_iters_ || !prefetch_ || !needs_copy_ || source_ == nullptr) { return; }
+      size_type prefetch_offset = batch_size_ * pos;
+      size_type prefetch_size = std::min(batch_size_, n_rows_ - std::min(prefetch_offset, n_rows_));
+      raft::common::nvtx::push_range(
+        "batch_load_iterator::prefetch(offset = %zu, size = %zu, row_width = %zu)",
+        size_t(prefetch_offset),
+        size_t(prefetch_size),
+        size_t(row_width()));
+      copy(prefetch_dev_ptr_,
+           source_ + prefetch_offset * row_width(),
+           prefetch_size * row_width(),
+           stream_);
       raft::common::nvtx::pop_range();
-      // Not swapping current and prefetch staging buffers until copy stream is idle, i.e., current
-      // copy is finished.
       stream_.synchronize();
-      std::swap(current_stg_buf_, prefetch_stg_buf_);
-      current_stg_buf_pos_.emplace(pos);
+      prefetch_pos_.emplace(pos);
     }
   };
 
@@ -595,8 +540,8 @@ struct batch_load_iterator {
                       size_type batch_size,
                       rmm::cuda_stream_view stream,
                       rmm::device_async_resource_ref mr = rmm::mr::get_current_device_resource(),
-                      bool staging_prefetch             = false)
-    : cur_batch_(new batch(source, n_rows, row_width, batch_size, stream, mr, staging_prefetch)),
+                      bool prefetch                     = false)
+    : cur_batch_(new batch(source, n_rows, row_width, batch_size, stream, mr, prefetch)),
       cur_pos_(0),
       cur_prefetch_pos_(0)
   {
@@ -640,7 +585,7 @@ struct batch_load_iterator {
     cur_batch_->load(cur_pos_);
     return cur_batch_.get();
   }
-  void prefetch() { cur_batch_->prefetch_to_staging_buf(cur_prefetch_pos_++); }
+  void prefetch() { cur_batch_->prefetch_load(cur_prefetch_pos_++); }
   friend auto operator==(const batch_load_iterator<T>& x, const batch_load_iterator<T>& y) -> bool
   {
     return x.cur_batch_ == y.cur_batch_ && x.cur_pos_ == y.cur_pos_;
