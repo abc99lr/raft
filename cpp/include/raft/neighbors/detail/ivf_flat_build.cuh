@@ -196,14 +196,15 @@ void extend(raft::resources const& handle,
   cudaEventCreate(&copy_done);
 
   // Predict the cluster labels for the new data, in batches if necessary
-  utils::batch_load_iterator<T> vec_batches(new_vectors,
-                                            n_rows,
-                                            index->dim(),
-                                            max_batch_size,
-                                            copy_stream.view(),
-                                            resource::get_workspace_resource(handle),
-                                            true);
-  vec_batches.prefetch();
+  utils::batch_load_iterator<T> vec_batches(
+    new_vectors,
+    n_rows,
+    index->dim(),
+    max_batch_size,
+    copy_stream.view(),
+    resource::get_workspace_resource(handle),
+    utils::batch_load_iterator<T>::PrefetchOption::PREFETCH_MULTITHREAD_COPY);
+  vec_batches.prefetch_next();
   for (const auto& batch : vec_batches) {
     auto batch_data_view =
       raft::make_device_matrix_view<const T, IdxT>(batch.data(), batch.size(), index->dim());
@@ -217,7 +218,7 @@ void extend(raft::resources const& handle,
                                             orig_centroids_view,
                                             batch_labels_view,
                                             utils::mapping<float>{});
-    vec_batches.prefetch();
+    vec_batches.prefetch_next();
   }
 
   auto* list_sizes_ptr    = index->list_sizes().data_handle();
@@ -281,7 +282,7 @@ void extend(raft::resources const& handle,
   utils::batch_load_iterator<IdxT> vec_indices(
     new_indices, n_rows, 1, max_batch_size, stream, resource::get_workspace_resource(handle));
   vec_batches.reset();
-  vec_batches.prefetch();
+  vec_batches.prefetch_next();
   utils::batch_load_iterator<IdxT> idx_batch = vec_indices.begin();
   size_t next_report_offset                  = 0;
   size_t d_report_offset                     = n_rows * 5 / 100;
@@ -305,7 +306,7 @@ void extend(raft::resources const& handle,
                                            index->veclen(),
                                            batch.offset());
     RAFT_CUDA_TRY(cudaPeekAtLastError());
-    vec_batches.prefetch();
+    vec_batches.prefetch_next();
 
     if (batch.offset() > next_report_offset) {
       float progress = batch.offset() * 100.0f / n_rows;
