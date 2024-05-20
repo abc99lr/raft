@@ -1601,7 +1601,7 @@ void extend(raft::resources const& handle,
                                     n_clusters,
                                     cudaMemcpyDefault,
                                     stream));
-    vec_batches.prefetch_next();
+    vec_batches.prefetch_next_batch();
     for (const auto& batch : vec_batches) {
       auto batch_data_view = raft::make_device_matrix_view<const T, internal_extents_t>(
         batch.data(), batch.size(), index->dim());
@@ -1617,7 +1617,7 @@ void extend(raft::resources const& handle,
                                               centers_view,
                                               batch_labels_view,
                                               utils::mapping<float>{});
-      vec_batches.prefetch_next();
+      vec_batches.prefetch_next_batch();
       // User needs to make sure kernel finishes its work before we overwrite batch in the next
       // iteration if different streams are used for kernel and copy.
       resource::sync_stream(handle);
@@ -1663,7 +1663,7 @@ void extend(raft::resources const& handle,
   utils::batch_load_iterator<IdxT> idx_batches(
     new_indices, n_rows, 1, max_batch_size, stream, device_memory);
   vec_batches.reset();
-  vec_batches.prefetch_next();
+  vec_batches.prefetch_next_batch();
   for (const auto& vec_batch : vec_batches) {
     const auto& idx_batch = *idx_batches++;
     process_and_fill_codes(handle,
@@ -1675,7 +1675,7 @@ void extend(raft::resources const& handle,
                            new_data_labels.data() + vec_batch.offset(),
                            IdxT(vec_batch.size()),
                            device_memory);
-    vec_batches.prefetch_next();
+    vec_batches.prefetch_next_batch();
     // User needs to make sure kernel finishes its work before we overwrite batch in the next
     // iteration if different streams are used for kernel and copy.
     resource::sync_stream(handle);

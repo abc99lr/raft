@@ -538,7 +538,7 @@ struct batch_load_iterator {
       }
     }
 
-    void multithread_staging_copy_(T* dest, const T* src, size_type size)
+    void multithread_staging(T* dest, const T* src, size_type size)
     {
       auto num_threads = std::min(omp_get_max_threads(), 4);
 #pragma omp parallel num_threads(num_threads)
@@ -568,16 +568,14 @@ struct batch_load_iterator {
         size_t(prefetch_offset),
         size_t(prefetch_size),
         size_t(row_width()));
-      // T* cur_prefetch_src = source_ + prefetch_offset * row_width();
       if (prefetch_ == PrefetchOption::PREFETCH_MULTITHREAD_COPY) {
-        // size_type num_staging = std::ceil(1.0 * prefetch_size * row_width() / staging_size_);
         size_type staging_offset = 0;
         while (staging_offset < prefetch_size * row_width()) {
           size_type cur_staging_size =
             std::min(staging_size_, prefetch_size * row_width() - staging_offset);
-          multithread_staging_copy_(next_stg_buf_->data(),
-                                    source_ + prefetch_offset * row_width() + staging_offset,
-                                    cur_staging_size);
+          multithread_staging(next_stg_buf_->data(),
+                              source_ + prefetch_offset * row_width() + staging_offset,
+                              cur_staging_size);
           stream_.synchronize();
           std::swap(next_stg_buf_, current_stg_buf_);
           copy(prefetch_dev_ptr_ + staging_offset,
@@ -586,24 +584,6 @@ struct batch_load_iterator {
                stream_);
           staging_offset += staging_size_;
         }
-        // if (num_staging <= 1) {
-        //   // Fall back to CUDA memcpy is only one staging is needed.
-        //   copy(prefetch_dev_ptr_, source_ + prefetch_offset * row_width(), prefetch_size *
-        //   row_width(), stream_);
-        // } else {
-        //   multithread_staging_copy_(prefetch_dev_ptr_, source_ + prefetch_offset * row_width(),
-        //   staging_size_);
-
-        // }
-        // std::cout << "*\n";
-        // copy(prefetch_dev_ptr_,
-        //     source_ + prefetch_offset * row_width(),
-        //     prefetch_size * row_width(),
-        //     stream_);
-
-        // std::memcpy(prefetch_stg_buf_->data(),
-        //             source_ + prefetch_offset() * row_width(),
-        //             prefetch_size * row_width() * sizeof(T));
       } else {
         copy(prefetch_dev_ptr_,
              source_ + prefetch_offset * row_width(),
@@ -686,7 +666,7 @@ struct batch_load_iterator {
     cur_batch_->load(cur_pos_);
     return cur_batch_.get();
   }
-  void prefetch_next() { cur_batch_->prefetch(cur_prefetch_pos_++); }
+  void prefetch_next_batch() { cur_batch_->prefetch(cur_prefetch_pos_++); }
   friend auto operator==(const batch_load_iterator<T>& x, const batch_load_iterator<T>& y) -> bool
   {
     return x.cur_batch_ == y.cur_batch_ && x.cur_pos_ == y.cur_pos_;
