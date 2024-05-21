@@ -22,6 +22,7 @@
 #include <raft/core/nvtx.hpp>
 #include <raft/core/operators.hpp>
 #include <raft/core/resource/cuda_stream.hpp>
+#include <raft/core/resource/cuda_stream_pool.hpp>
 #include <raft/core/resource/device_memory_resource.hpp>
 #include <raft/core/resources.hpp>
 #include <raft/distance/distance_types.hpp>
@@ -46,7 +47,6 @@
 #include <raft/util/pow2_utils.cuh>
 #include <raft/util/vectorized.cuh>
 
-#include <rmm/cuda_stream.hpp>
 #include <rmm/cuda_stream_view.hpp>
 #include <rmm/device_uvector.hpp>
 #include <rmm/mr/device/managed_memory_resource.hpp>
@@ -1505,7 +1505,6 @@ void extend(raft::resources const& handle,
             const IdxT* new_indices,
             IdxT n_rows)
 {
-  std::cout << "Version trying to get multi-threaded done\n";
   common::nvtx::range<common::nvtx::domain::raft> fun_scope(
     "ivf_pq::extend(%zu, %u)", size_t(n_rows), index->dim());
 
@@ -1572,18 +1571,22 @@ void extend(raft::resources const& handle,
     free_mem -= size_factor * max_batch_size;
   }
 
-  rmm::cuda_stream copy_stream;
+  // Determine if a stream pool is setup and make sure there is at least one stream in it so we
+  // could use the stream for kernel/copy overlapping.
+  auto copy_stream = resource::get_cuda_stream(handle);  // Using the main stream by default
+  if (resource::get_stream_pool_size(handle) >= 1) {
+    copy_stream = resource::get_stream_from_stream_pool(handle);
+  }
 
   // Predict the cluster labels for the new data, in batches if necessary
-  // bool prefetch_batches = true;
   utils::batch_load_iterator<T> vec_batches(
     new_vectors,
     n_rows,
     index->dim(),
     max_batch_size,
-    copy_stream.view(),
+    copy_stream,
     device_memory,
-    utils::batch_load_iterator<T>::PrefetchOption::PREFETCH_MULTITHREAD_COPY);
+    utils::batch_load_iterator<T>::PrefetchOption::PREFETCH_MULTITHREAD_MEMCOPY);
   // Release the placeholder memory, because we don't intend to allocate any more long-living
   // temporary buffers before we allocate the index data.
   // This memory could potentially speed up UVM accesses, if any.

@@ -21,8 +21,8 @@
 #include <raft/core/mdarray.hpp>
 #include <raft/core/nvtx.hpp>
 #include <raft/core/operators.hpp>
-#include <raft/core/resource/cuda_event.hpp>
 #include <raft/core/resource/cuda_stream.hpp>
+#include <raft/core/resource/cuda_stream_pool.hpp>
 #include <raft/core/resources.hpp>
 #include <raft/linalg/add.cuh>
 #include <raft/linalg/map.cuh>
@@ -191,9 +191,12 @@ void extend(raft::resources const& handle,
   constexpr size_t kReasonableMaxBatchSize = 65536;
   size_t max_batch_size                    = std::min<size_t>(n_rows, kReasonableMaxBatchSize);
 
-  rmm::cuda_stream copy_stream;
-  cudaEvent_t copy_done;
-  cudaEventCreate(&copy_done);
+  // Determine if a stream pool is setup and make sure there is at least one stream in it so we
+  // could use the stream for kernel/copy overlapping.
+  auto copy_stream = resource::get_cuda_stream(handle);  // Using the main stream by default
+  if (resource::get_stream_pool_size(handle) >= 1) {
+    copy_stream = resource::get_stream_from_stream_pool(handle);
+  }
 
   // Predict the cluster labels for the new data, in batches if necessary
   utils::batch_load_iterator<T> vec_batches(
@@ -201,17 +204,15 @@ void extend(raft::resources const& handle,
     n_rows,
     index->dim(),
     max_batch_size,
-    copy_stream.view(),
+    copy_stream,
     resource::get_workspace_resource(handle),
-    utils::batch_load_iterator<T>::PrefetchOption::PREFETCH_MULTITHREAD_COPY);
+    utils::batch_load_iterator<T>::PrefetchOption::PREFETCH_MULTITHREAD_MEMCOPY);
   vec_batches.prefetch_next_batch();
   for (const auto& batch : vec_batches) {
     auto batch_data_view =
       raft::make_device_matrix_view<const T, IdxT>(batch.data(), batch.size(), index->dim());
     auto batch_labels_view = raft::make_device_vector_view<LabelT, IdxT>(
       new_labels.data_handle() + batch.offset(), batch.size());
-    cudaEventRecord(copy_done, copy_stream.value());
-    cudaStreamWaitEvent(stream.value(), copy_done);
     raft::cluster::kmeans_balanced::predict(handle,
                                             kmeans_params,
                                             batch_data_view,
@@ -292,8 +293,6 @@ void extend(raft::resources const& handle,
   for (const auto& batch : vec_batches) {
     auto batch_data_view =
       raft::make_device_matrix_view<const T, IdxT>(batch.data(), batch.size(), index->dim());
-    cudaEventRecord(copy_done, copy_stream.value());
-    cudaStreamWaitEvent(stream.value(), copy_done);
     // Kernel to insert the new vectors
     const dim3 block_dim(256);
     const dim3 grid_dim(raft::ceildiv<IdxT>(batch.size(), block_dim.x));
@@ -346,7 +345,6 @@ void extend(raft::resources const& handle,
                           stream);
     RAFT_LOG_TRACE_VEC(index->center_norms()->data_handle(), std::min<uint32_t>(dim, 20));
   }
-  cudaEventDestroy(copy_done);
 }
 
 /** See raft::neighbors::ivf_flat::extend docs */

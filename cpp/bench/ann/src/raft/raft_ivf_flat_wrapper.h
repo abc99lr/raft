@@ -28,6 +28,8 @@
 #include <raft/neighbors/ivf_flat_types.hpp>
 #include <raft/util/cudart_utils.hpp>
 
+#include <rmm/cuda_stream_pool.hpp>
+
 #include <cassert>
 #include <fstream>
 #include <iostream>
@@ -97,6 +99,9 @@ class RaftIvfFlatGpu : public ANN<T>, public AnnGPU {
 template <typename T, typename IdxT>
 void RaftIvfFlatGpu<T, IdxT>::build(const T* dataset, size_t nrow)
 {
+  // Create a CUDA stream pool with 1 stream (besides main stream) for kernel/copy overlapping.
+  size_t n_streams = 1;
+  resource::set_cuda_stream_pool(handle_, std::make_shared<rmm::cuda_stream_pool>(n_streams));
   index_ = std::make_shared<raft::neighbors::ivf_flat::index<T, IdxT>>(std::move(
     raft::neighbors::ivf_flat::build(handle_, index_params_, dataset, IdxT(nrow), dimension_)));
 }

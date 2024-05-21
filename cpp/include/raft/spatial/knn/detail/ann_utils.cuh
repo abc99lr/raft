@@ -402,7 +402,7 @@ template <typename T>
 struct batch_load_iterator {
   using size_type = size_t;
 
-  enum PrefetchOption { PREFETCH_NONE = 0, PREFETCH_DEFAULT_MEMCPY, PREFETCH_MULTITHREAD_COPY };
+  enum PrefetchOption { PREFETCH_NONE = 0, PREFETCH_DEFAULT_MEMCPY, PREFETCH_MULTITHREAD_MEMCOPY };
 
   struct staging_buffer {
     staging_buffer() : n_(0) { res_ = new rmm::mr::pinned_memory_resource(); }
@@ -475,7 +475,7 @@ struct batch_load_iterator {
         if (prefetch_ != PrefetchOption::PREFETCH_NONE) {
           buf_1_.resize(row_width_ * batch_size_, stream);
           prefetch_dev_ptr_ = buf_1_.data();
-          if (prefetch_ == PrefetchOption::PREFETCH_MULTITHREAD_COPY) {
+          if (prefetch_ == PrefetchOption::PREFETCH_MULTITHREAD_MEMCOPY) {
             staging_buf_0_.allocate(staging_size_);
             staging_buf_1_.allocate(staging_size_);
             current_stg_buf_ = &staging_buf_0_;
@@ -500,12 +500,12 @@ struct batch_load_iterator {
     size_type batch_len_;
     T* dev_ptr_;
     T* prefetch_dev_ptr_;
-    // Staging buffers are only used if PrefetchOption is PREFETCH_MULTITHREAD_COPY.
+    // Staging buffers are only used if PrefetchOption is PREFETCH_MULTITHREAD_MEMCOPY.
     staging_buffer staging_buf_0_;
     staging_buffer staging_buf_1_;
     staging_buffer* current_stg_buf_;
     staging_buffer* next_stg_buf_;
-    // Use 1Mi * sizeof(T) byte internal staging buffer if PREFETCH_MULTITHREAD_COPY is enabled.
+    // Use 1Mi * sizeof(T) byte internal staging buffer if PREFETCH_MULTITHREAD_MEMCOPY is enabled.
     size_type staging_size_ = 1 << 20;
 
     friend class batch_load_iterator<T>;
@@ -568,7 +568,7 @@ struct batch_load_iterator {
         size_t(prefetch_offset),
         size_t(prefetch_size),
         size_t(row_width()));
-      if (prefetch_ == PrefetchOption::PREFETCH_MULTITHREAD_COPY) {
+      if (prefetch_ == PrefetchOption::PREFETCH_MULTITHREAD_MEMCOPY) {
         size_type staging_offset = 0;
         while (staging_offset < prefetch_size * row_width()) {
           size_type cur_staging_size =
